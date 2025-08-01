@@ -40,6 +40,14 @@ class ARQVApp {
                     analyzeBtn.click();
                 }
             }
+            
+            // Ctrl+S para salvar análise
+            if (e.ctrlKey && e.key === 's') {
+                e.preventDefault();
+                if (window.analysisManager && window.analysisManager.currentAnalysis) {
+                    window.analysisManager.saveAnalysisLocally(window.analysisManager.currentAnalysis);
+                }
+            }
         });
 
         // Smooth scrolling for internal links
@@ -47,6 +55,7 @@ class ARQVApp {
             anchor.addEventListener('click', function (e) {
                 e.preventDefault();
                 const target = document.querySelector(this.getAttribute('href'));
+                if (target) {
                         console.log('✅ Service Worker registered successfully');
                         
                         // Check for updates
@@ -63,14 +72,43 @@ class ARQVApp {
                         });
                     target.scrollIntoView({
                         behavior: 'smooth',
+                        block: 'start'
                         console.warn('⚠️ Service Worker registration failed:', registrationError);
                     });
+                }
                 }
             });
         });
 
         // Enhanced form interactions
         this.setupFormEnhancements();
+        
+        // Service Worker registration
+        this.registerServiceWorker();
+    }
+    
+    registerServiceWorker() {
+        if ('serviceWorker' in navigator) {
+            navigator.serviceWorker.register('/sw.js')
+                .then((registration) => {
+                    console.log('✅ Service Worker registered successfully');
+                    
+                    // Check for updates
+                    registration.addEventListener('updatefound', () => {
+                        const newWorker = registration.installing;
+                        newWorker.addEventListener('statechange', () => {
+                            if (newWorker.state === 'installed' && navigator.serviceWorker.controller) {
+                                // New version available
+                                this.showInfo('Nova versão disponível! Recarregue a página para atualizar.');
+                            }
+                        });
+                    });
+                })
+                .catch((registrationError) => {
+                    console.warn('⚠️ Service Worker registration failed:', registrationError);
+                });
+        } else {
+            console.warn('⚠️ Service Worker not supported in this browser');
     }
 
     setupFormEnhancements() {
@@ -445,7 +483,7 @@ class ARQVApp {
         alert.innerHTML = `
             <div style="display: flex; align-items: center; gap: 12px;">
                 <i class="${icon}"></i>
-                <span>${message}</span>
+                <span style="flex: 1; white-space: pre-line;">${message}</span>
                 <button onclick="this.parentElement.parentElement.remove()" style="
                     background: none; 
                     border: none; 
@@ -453,18 +491,29 @@ class ARQVApp {
                     font-size: 18px; 
                     cursor: pointer;
                     margin-left: auto;
+                    padding: 4px;
+                    border-radius: 4px;
+                    transition: background 0.2s;
                 ">×</button>
             </div>
         `;
 
         document.body.appendChild(alert);
 
-        // Auto-remove after 5 seconds
+        // Auto-remove after 8 seconds for errors, 5 for others
+        const autoRemoveTime = type === 'error' ? 8000 : 5000;
         setTimeout(() => {
             if (alert.parentElement) {
                 alert.remove();
             }
-        }, 5000);
+        }, autoRemoveTime);
+        
+        // Add click to close
+        alert.addEventListener('click', (e) => {
+            if (e.target === alert) {
+                alert.remove();
+            }
+        });
     }
 
     // Utility methods
@@ -528,6 +577,33 @@ class ARQVApp {
             observer.observe({ entryTypes: ['navigation'] });
         }
     }
+    
+    // Enhanced error handling
+    handleGlobalError(error, context = '') {
+        console.error('Global error:', error, context);
+        
+        // Don't show alerts for minor errors
+        if (error.message && error.message.includes('ResizeObserver')) {
+            return; // Ignore ResizeObserver errors
+        }
+        
+        this.showError(`Erro inesperado${context ? ` em ${context}` : ''}: ${error.message}`);
+    }
+    
+    // System health check
+    async checkSystemHealth() {
+        try {
+            const response = await fetch('/api/health');
+            if (response.ok) {
+                const health = await response.json();
+                console.log('System health:', health);
+                return health;
+            }
+        } catch (error) {
+            console.warn('Health check failed:', error);
+        }
+        return null;
+    }
 }
 
 // Initialize app when DOM is loaded
@@ -572,21 +648,15 @@ document.addEventListener('DOMContentLoaded', () => {
 
 // Global error handler
 window.addEventListener('error', (event) => {
-    console.error('Global error:', event.error);
     if (window.app) {
-        window.app.showError('Ocorreu um erro inesperado. Verifique o console para mais detalhes.');
+        window.app.handleGlobalError(event.error, 'JavaScript');
     }
 });
 
-// Service worker registration (if available)
-if ('serviceWorker' in navigator) {
-    window.addEventListener('load', () => {
-        navigator.serviceWorker.register('/sw.js')
-            .then((registration) => {
-                console.log('SW registered: ', registration);
-            })
-            .catch((registrationError) => {
-                console.log('SW registration failed: ', registrationError);
-            });
-    });
-}
+// Unhandled promise rejection handler
+window.addEventListener('unhandledrejection', (event) => {
+    if (window.app) {
+        window.app.handleGlobalError(new Error(event.reason), 'Promise');
+    }
+    event.preventDefault();
+});

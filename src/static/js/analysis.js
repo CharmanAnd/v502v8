@@ -616,7 +616,7 @@ class AnalysisManager {
     }
 
     onAnalysisError(error, result = null) {
-        logger.error('Erro na análise:', error);
+        console.error('Erro na análise:', error);
         
         this.hideProgressSection();
         
@@ -629,6 +629,35 @@ class AnalysisManager {
         
         if (result && result.required_apis) {
             errorMessage += `\n\nAPIs necessárias:\n${result.required_apis.join('\n')}`;
+        }
+        
+        // Mostra status dos provedores se disponível
+        if (result && (result.ai_status || result.search_status)) {
+            console.log('Status dos provedores:', {
+                ai: result.ai_status,
+                search: result.search_status
+            });
+        }
+        
+        // Se é erro de dados insuficientes, sugere retry
+        if (result && result.retry_suggested && result.fallback_available) {
+            errorMessage += '\n\n🔄 Você pode tentar novamente com informações mais específicas.';
+            
+            // Adiciona botão de retry
+            setTimeout(() => {
+                const retryBtn = document.createElement('button');
+                retryBtn.className = 'btn-secondary';
+                retryBtn.innerHTML = '<i class="fas fa-redo"></i> Tentar Novamente';
+                retryBtn.onclick = () => {
+                    retryBtn.remove();
+                    this.startAnalysis();
+                };
+                
+                const formActions = document.querySelector('.form-actions');
+                if (formActions) {
+                    formActions.appendChild(retryBtn);
+                }
+            }, 2000);
         }
         
         window.app?.showError(errorMessage);
@@ -746,9 +775,31 @@ class AnalysisManager {
 
     renderResearchResults(analysis) {
         const container = document.getElementById('researchResults');
-        if (!container || !analysis.pesquisa_web_massiva) return;
+        if (!container) return;
+        
+        // Verifica múltiplas possíveis estruturas de pesquisa
+        const research = analysis.pesquisa_web_massiva || 
+                        analysis.pesquisa_massiva || 
+                        analysis.dados_pesquisa_real ||
+                        analysis.research_data;
+        
+        if (!research) {
+            container.innerHTML = `
+                <div class="result-section">
+                    <div class="result-section-header">
+                        <i class="fas fa-exclamation-triangle"></i>
+                        <h4>Pesquisa Web</h4>
+                    </div>
+                    <div class="result-section-content">
+                        <div class="error-message">
+                            Dados de pesquisa não disponíveis nesta análise.
+                        </div>
+                    </div>
+                </div>
+            `;
+            return;
+        }
 
-        const research = analysis.pesquisa_web_massiva;
         
         container.innerHTML = `
             <div class="result-section">
@@ -760,7 +811,9 @@ class AnalysisManager {
                     <div class="research-content">
                         <div class="data-quality-indicator">
                             <span class="quality-label">Qualidade dos Dados:</span>
-                            <span class="quality-value real-data">100% DADOS REAIS</span>
+                            <span class="quality-value ${research.total_resultados > 0 ? 'real-data' : 'simulated-data'}">
+                                ${research.total_resultados > 0 ? '100% DADOS REAIS' : 'DADOS LIMITADOS'}
+                            </span>
                         </div>
                         
                         <div class="research-stats">
@@ -798,18 +851,24 @@ class AnalysisManager {
                             </div>
                         ` : ''}
                         
-                        ${research.resultados_detalhados ? `
+                        ${(research.resultados_detalhados || research.sources) ? `
                             <div class="detailed-results">
                                 <h5 style="color: var(--accent-tertiary); margin-bottom: 15px;">📄 Fontes Analisadas</h5>
                                 <div class="results-list">
-                                    ${research.resultados_detalhados.slice(0, 15).map(source => `
+                                    ${(research.resultados_detalhados || research.sources).slice(0, 15).map(source => `
                                         <div class="result-item">
-                                            <h5>${source.title}</h5>
+                                            <h5>${source.title || source.titulo || 'Fonte'}</h5>
                                             <div class="result-url">${source.url}</div>
-                                            <div class="result-source">Fonte: ${source.source}</div>
+                                            <div class="result-source">Fonte: ${source.source || source.fonte || 'Web'}</div>
                                         </div>
                                     `).join('')}
                                 </div>
+                            </div>
+                        ` : ''}
+                        
+                        ${research.total_resultados === 0 ? `
+                            <div class="error-message">
+                                ⚠️ Pesquisa retornou poucos resultados. Considere usar termos mais específicos ou verificar conectividade.
                             </div>
                         ` : ''}
                     </div>
@@ -868,15 +927,37 @@ class AnalysisManager {
 
     renderInsightsResults(analysis) {
         const container = document.getElementById('insightsResults');
-        if (!container || !analysis.insights_exclusivos) return;
+        if (!container) return;
+        
+        // Verifica múltiplas possíveis estruturas de insights
+        const insights = analysis.insights_exclusivos || 
+                        analysis.insights_exclusivos_ultra ||
+                        analysis.insights ||
+                        [];
+        
+        if (!insights || insights.length === 0) {
+            container.innerHTML = `
+                <div class="result-section">
+                    <div class="result-section-header">
+                        <i class="fas fa-lightbulb"></i>
+                        <h4>Insights Exclusivos</h4>
+                    </div>
+                    <div class="result-section-content">
+                        <div class="error-message">
+                            Insights não foram gerados nesta análise. Tente novamente com mais informações.
+                        </div>
+                    </div>
+                </div>
+            `;
+            return;
+        }
 
-        const insights = analysis.insights_exclusivos;
         
         container.innerHTML = `
             <div class="result-section">
                 <div class="result-section-header">
                     <i class="fas fa-lightbulb"></i>
-                    <h4>Insights Exclusivos Ultra-Valiosos</h4>
+                    <h4>Insights Exclusivos Ultra-Valiosos (${insights.length})</h4>
                 </div>
                 <div class="result-section-content">
                     <div class="insights-showcase">
@@ -887,6 +968,15 @@ class AnalysisManager {
                             </div>
                         `).join('')}
                     </div>
+                    
+                    ${insights.length < 10 ? `
+                        <div style="margin-top: 20px; padding: 15px; background: var(--bg-surface); border-radius: 12px; border-left: 4px solid var(--accent-gold);">
+                            <strong style="color: var(--accent-gold);">💡 Dica:</strong>
+                            <span style="color: var(--text-secondary);">
+                                Para obter mais insights, forneça informações mais detalhadas sobre seu segmento e público-alvo.
+                            </span>
+                        </div>
+                    ` : ''}
                 </div>
             </div>
         `;
@@ -894,9 +984,34 @@ class AnalysisManager {
 
     renderMetadataResults(analysis) {
         const container = document.getElementById('metadataResults');
-        if (!container || !analysis.metadata) return;
+        if (!container) return;
+        
+        const metadata = analysis.metadata || analysis.metadata_ai || {};
+        
+        if (Object.keys(metadata).length === 0) {
+            container.innerHTML = `
+                <div class="result-section">
+                    <div class="result-section-header">
+                        <i class="fas fa-info-circle"></i>
+                        <h4>Metadados da Análise</h4>
+                    </div>
+                    <div class="result-section-content">
+                        <div class="metadata-grid">
+                            <div class="metadata-item">
+                                <span class="metadata-label">Status</span>
+                                <span class="metadata-value">Análise Concluída</span>
+                            </div>
+                            <div class="metadata-item">
+                                <span class="metadata-label">Timestamp</span>
+                                <span class="metadata-value">${new Date().toLocaleString()}</span>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            `;
+            return;
+        }
 
-        const metadata = analysis.metadata;
         
         container.innerHTML = `
             <div class="result-section">
@@ -916,7 +1031,7 @@ class AnalysisManager {
                         </div>
                         <div class="metadata-item">
                             <span class="metadata-label">Score de Qualidade</span>
-                            <span class="metadata-value">${metadata.quality_score || 'N/A'}%</span>
+                            <span class="metadata-value" style="color: ${(metadata.quality_score || 0) >= 80 ? 'var(--accent-tertiary)' : (metadata.quality_score || 0) >= 60 ? 'var(--accent-gold)' : '#ff6b6b'}">${metadata.quality_score || 'N/A'}%</span>
                         </div>
                         <div class="metadata-item">
                             <span class="metadata-label">Fontes Analisadas</span>
@@ -928,9 +1043,20 @@ class AnalysisManager {
                         </div>
                         <div class="metadata-item">
                             <span class="metadata-label">Garantia de Dados</span>
-                            <span class="metadata-value" style="color: var(--accent-tertiary);">100% REAIS</span>
+                            <span class="metadata-value" style="color: ${metadata.simulation_free_guarantee ? 'var(--accent-tertiary)' : 'var(--accent-gold)'};">
+                                ${metadata.simulation_free_guarantee ? '100% REAIS' : 'DADOS MISTOS'}
+                            </span>
                         </div>
                     </div>
+                    
+                    ${metadata.note || metadata.recommendation ? `
+                        <div style="margin-top: 20px; padding: 15px; background: var(--bg-surface); border-radius: 12px; border-left: 4px solid var(--accent-primary);">
+                            <strong style="color: var(--accent-primary);">ℹ️ Informação:</strong>
+                            <span style="color: var(--text-secondary);">
+                                ${metadata.note || metadata.recommendation}
+                            </span>
+                        </div>
+                    ` : ''}
                 </div>
             </div>
         `;
@@ -938,9 +1064,14 @@ class AnalysisManager {
 
     // Métodos de renderização simplificados para outras seções
     renderCompetitionResults(analysis) {
-        // Implementação simplificada
         const container = document.getElementById('competitionResults');
-        if (container && analysis.analise_concorrencia_detalhada) {
+        if (!container) return;
+        
+        const competition = analysis.analise_concorrencia_detalhada || 
+                           analysis.analise_concorrencia_profunda ||
+                           analysis.competition_data;
+        
+        if (competition) {
             container.innerHTML = `
                 <div class="result-section">
                     <div class="result-section-header">
@@ -948,7 +1079,26 @@ class AnalysisManager {
                         <h4>Análise de Concorrência</h4>
                     </div>
                     <div class="result-section-content">
-                        <p style="color: var(--text-primary);">Análise detalhada da concorrência disponível nos dados completos.</p>
+                        <div class="success-message">
+                            ✅ Análise detalhada da concorrência foi gerada com sucesso.
+                        </div>
+                        <p style="color: var(--text-secondary); margin-top: 15px;">
+                            Dados completos disponíveis no download PDF ou na resposta JSON completa.
+                        </p>
+                    </div>
+                </div>
+            `;
+        } else {
+            container.innerHTML = `
+                <div class="result-section">
+                    <div class="result-section-header">
+                        <i class="fas fa-chess"></i>
+                        <h4>Análise de Concorrência</h4>
+                    </div>
+                    <div class="result-section-content">
+                        <div class="error-message">
+                            Análise de concorrência não foi gerada. Forneça informações sobre concorrentes para uma análise mais completa.
+                        </div>
                     </div>
                 </div>
             `;
@@ -957,7 +1107,13 @@ class AnalysisManager {
 
     renderPositioningResults(analysis) {
         const container = document.getElementById('positioningResults');
-        if (container && analysis.escopo) {
+        if (!container) return;
+        
+        const positioning = analysis.escopo || 
+                           analysis.escopo_posicionamento ||
+                           analysis.positioning_data;
+        
+        if (positioning) {
             container.innerHTML = `
                 <div class="result-section">
                     <div class="result-section-header">
@@ -965,7 +1121,26 @@ class AnalysisManager {
                         <h4>Posicionamento e Escopo</h4>
                     </div>
                     <div class="result-section-content">
-                        <p style="color: var(--text-primary);">Estratégia de posicionamento detalhada disponível nos dados completos.</p>
+                        <div class="success-message">
+                            ✅ Estratégia de posicionamento foi desenvolvida com sucesso.
+                        </div>
+                        <p style="color: var(--text-secondary); margin-top: 15px;">
+                            Estratégia completa disponível no download PDF ou na resposta JSON completa.
+                        </p>
+                    </div>
+                </div>
+            `;
+        } else {
+            container.innerHTML = `
+                <div class="result-section">
+                    <div class="result-section-header">
+                        <i class="fas fa-bullseye"></i>
+                        <h4>Posicionamento e Escopo</h4>
+                    </div>
+                    <div class="result-section-content">
+                        <div class="error-message">
+                            Estratégia de posicionamento não foi gerada. Adicione mais detalhes sobre seu produto/serviço.
+                        </div>
                     </div>
                 </div>
             `;
@@ -1124,12 +1299,34 @@ class AnalysisManager {
 
                 window.app?.showSuccess('Relatório PDF baixado com sucesso!');
             } else {
-                throw new Error('Erro ao gerar PDF');
+                const errorData = await response.json();
+                throw new Error(errorData.message || 'Erro ao gerar PDF');
             }
 
         } catch (error) {
             console.error('Erro ao baixar PDF:', error);
-            window.app?.showError('Erro ao gerar relatório PDF');
+            window.app?.showError(`Erro ao gerar relatório PDF: ${error.message}`);
+        }
+    }
+    
+    // Método para salvar análise localmente
+    saveAnalysisLocally(analysis) {
+        try {
+            const dataStr = JSON.stringify(analysis, null, 2);
+            const dataBlob = new Blob([dataStr], {type: 'application/json'});
+            const url = URL.createObjectURL(dataBlob);
+            const link = document.createElement('a');
+            link.href = url;
+            link.download = `analise_completa_${new Date().toISOString().slice(0, 10)}.json`;
+            document.body.appendChild(link);
+            link.click();
+            document.body.removeChild(link);
+            URL.revokeObjectURL(url);
+            
+            window.app?.showSuccess('Análise completa salva localmente!');
+        } catch (error) {
+            console.error('Erro ao salvar análise:', error);
+            window.app?.showError('Erro ao salvar análise localmente');
         }
     }
 }

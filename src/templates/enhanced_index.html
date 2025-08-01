@@ -201,6 +201,27 @@
                                 <i class="fas fa-magic"></i>
                                 <span>Gerar Análise Ultra-Detalhada</span>
                             </button>
+                            
+                            <div class="test-section" style="margin-top: 20px; padding: 20px; background: var(--bg-surface); border-radius: 12px; box-shadow: var(--shadow-inset);">
+                                <h4 style="color: var(--accent-primary); margin-bottom: 15px;">🧪 Testes do Sistema</h4>
+                                <div style="display: flex; gap: 10px; flex-wrap: wrap;">
+                                    <button type="button" class="btn-secondary" onclick="analysisManager.testExtraction()">
+                                        <i class="fas fa-download"></i> Testar Extração
+                                    </button>
+                                    <button type="button" class="btn-secondary" onclick="analysisManager.testSearch()">
+                                        <i class="fas fa-search"></i> Testar Busca
+                                    </button>
+                                    <button type="button" class="btn-secondary" onclick="analysisManager.showExtractorStats()">
+                                        <i class="fas fa-chart-bar"></i> Stats Extratores
+                                    </button>
+                                    <button type="button" class="btn-secondary" onclick="analysisManager.resetExtractors()">
+                                        <i class="fas fa-refresh"></i> Reset Extratores
+                                    </button>
+                                    <button type="button" class="btn-secondary" onclick="window.app.checkSystemHealth().then(h => console.log('Health:', h))">
+                                        <i class="fas fa-heartbeat"></i> Health Check
+                                    </button>
+                                </div>
+                            </div>
                         </div>
                     </form>
                 </div>
@@ -264,6 +285,10 @@
                                 <i class="fas fa-download"></i>
                                 Download PDF
                             </button>
+                            <button class="btn-secondary" id="saveJsonBtn" style="display: none;" onclick="analysisManager.saveAnalysisLocally(analysisManager.currentAnalysis)">
+                                <i class="fas fa-save"></i>
+                                Salvar JSON
+                            </button>
                             <button class="btn-secondary" onclick="location.reload()">
                                 <i class="fas fa-plus"></i>
                                 Nova Análise
@@ -326,9 +351,9 @@
         bottom: 0;
         left: 0;
         right: 0;
-        background: var(--glass-bg);
-        backdrop-filter: var(--glass-blur);
-        border-top: 1px solid var(--glass-border);
+        background: var(--bg-surface);
+        border-top: 1px solid rgba(255, 255, 255, 0.05);
+        box-shadow: var(--shadow-subtle);
         padding: 8px 16px;
         display: flex;
         justify-content: center;
@@ -344,6 +369,13 @@
         <div class="system-status" id="apiStatus">
             <i class="fas fa-cog fa-spin"></i>
             <span>Verificando APIs...</span>
+        </div>
+        <div class="system-status" id="extractorStatus">
+            <i class="fas fa-download"></i>
+            <span>Extratores: Carregando...</span>
+        </div>
+        <div style="font-size: 10px; color: var(--text-muted);">
+            Ctrl+Enter: Analisar | Ctrl+S: Salvar
         </div>
     </div>
 

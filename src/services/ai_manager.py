@@ -45,7 +45,9 @@ class AIManager:
                 'priority': 1,
                 'error_count': 0,
                 'model': 'gemini-1.5-flash',
-                'max_errors': 3
+                'max_errors': 2,
+                'last_success': None,
+                'consecutive_failures': 0
             },
             'groq': {
                 'client': None,
@@ -53,7 +55,9 @@ class AIManager:
                 'priority': 2,
                 'error_count': 0,
                 'model': 'llama3-70b-8192',
-                'max_errors': 3
+                'max_errors': 2,
+                'last_success': None,
+                'consecutive_failures': 0
             },
             'openai': {
                 'client': None,
@@ -61,7 +65,9 @@ class AIManager:
                 'priority': 3,
                 'error_count': 0,
                 'model': 'gpt-3.5-turbo',
-                'max_errors': 3
+                'max_errors': 2,
+                'last_success': None,
+                'consecutive_failures': 0
             },
             'huggingface': {
                 'client': None,
@@ -70,7 +76,9 @@ class AIManager:
                 'error_count': 0,
                 'models': ["HuggingFaceH4/zephyr-7b-beta", "google/flan-t5-base"],
                 'current_model_index': 0,
-                'max_errors': 5
+                'max_errors': 3,
+                'last_success': None,
+                'consecutive_failures': 0
             }
         }
 
@@ -134,25 +142,48 @@ class AIManager:
 
     def get_best_provider(self) -> Optional[str]:
         """Retorna o melhor provedor disponível com base na prioridade e contagem de erros."""
+        current_time = time.time()
+        
+        # Primeiro, tenta reabilitar provedores que podem ter se recuperado
+        for name, provider in self.providers.items():
+            if (not provider['available'] and 
+                provider.get('last_success') and 
+                current_time - provider['last_success'] > 300):  # 5 minutos
+                logger.info(f"🔄 Tentando reabilitar provedor {name} após cooldown")
+                provider['error_count'] = 0
+                provider['consecutive_failures'] = 0
+                if name == 'gemini' and HAS_GEMINI:
+                    provider['available'] = True
+                elif name == 'groq' and HAS_GROQ_CLIENT:
+                    provider['available'] = True
+                elif name == 'openai' and HAS_OPENAI:
+                    provider['available'] = True
+                elif name == 'huggingface':
+                    provider['available'] = True
+        
         available_providers = [
             (name, provider) for name, provider in self.providers.items() 
-            if provider['available'] and provider['error_count'] < provider.get('max_errors', 3)
+            if provider['available'] and provider['consecutive_failures'] < provider.get('max_errors', 2)
         ]
 
         if not available_providers:
-            logger.warning("Nenhum provedor saudável disponível. Resetando contagem de erros.")
+            logger.warning("🔄 Nenhum provedor saudável disponível. Resetando contadores.")
             for provider in self.providers.values():
                 provider['error_count'] = 0
+                provider['consecutive_failures'] = 0
             available_providers = [(name, p) for name, p in self.providers.items() if p['available']]
 
         if available_providers:
-            available_providers.sort(key=lambda x: (x[1]['priority'], x[1]['error_count']))
+            # Ordena por prioridade e falhas consecutivas
+            available_providers.sort(key=lambda x: (x[1]['priority'], x[1]['consecutive_failures']))
             return available_providers[0][0]
 
         return None
 
     def generate_analysis(self, prompt: str, max_tokens: int = 8192, provider: Optional[str] = None) -> Optional[str]:
         """Gera análise usando um provedor específico ou o melhor disponível com fallback."""
+        
+        start_time = time.time()
         
         # Se um provedor específico for solicitado
         if provider:
@@ -161,12 +192,13 @@ class AIManager:
                 try:
                     result = self._call_provider(provider, prompt, max_tokens)
                     if result:
+                        self._record_success(provider)
                         return result
                     else:
                         raise Exception("Resposta vazia")
                 except Exception as e:
                     logger.error(f"❌ Provedor solicitado {provider.upper()} falhou: {e}")
-                    self.providers[provider]['error_count'] += 1
+                    self._record_failure(provider, str(e))
                     return None # Não tenta fallback se um provedor específico foi pedido e falhou
             else:
                 logger.error(f"❌ Provedor solicitado '{provider}' não está disponível.")
@@ -175,14 +207,39 @@ class AIManager:
         # Lógica de fallback padrão
         provider_name = self.get_best_provider()
         if not provider_name:
-            raise Exception("NENHUM PROVEDOR DE IA DISPONÍVEL: Configure pelo menos uma API de IA.")
+            raise Exception("❌ NENHUM PROVEDOR DE IA DISPONÍVEL: Configure pelo menos uma API de IA (Gemini, Groq, OpenAI ou HuggingFace)")
 
         try:
-            return self._call_provider(provider_name, prompt, max_tokens)
+            result = self._call_provider(provider_name, prompt, max_tokens)
+            if result:
+                self._record_success(provider_name)
+                return result
+            else:
+                raise Exception("Resposta vazia do provedor")
         except Exception as e:
             logger.error(f"❌ Erro no provedor {provider_name}: {e}")
-            self.providers[provider_name]['error_count'] += 1
+            self._record_failure(provider_name, str(e))
             return self._try_fallback(prompt, max_tokens, exclude=[provider_name])
+    
+    def _record_success(self, provider_name: str):
+        """Registra sucesso do provedor"""
+        if provider_name in self.providers:
+            self.providers[provider_name]['consecutive_failures'] = 0
+            self.providers[provider_name]['last_success'] = time.time()
+            logger.info(f"✅ Sucesso registrado para {provider_name}")
+    
+    def _record_failure(self, provider_name: str, error_msg: str):
+        """Registra falha do provedor"""
+        if provider_name in self.providers:
+            self.providers[provider_name]['error_count'] += 1
+            self.providers[provider_name]['consecutive_failures'] += 1
+            
+            # Desabilita temporariamente se muitas falhas consecutivas
+            if self.providers[provider_name]['consecutive_failures'] >= self.providers[provider_name]['max_errors']:
+                logger.warning(f"⚠️ Desabilitando {provider_name} temporariamente após {self.providers[provider_name]['consecutive_failures']} falhas consecutivas")
+                self.providers[provider_name]['available'] = False
+            
+            logger.error(f"❌ Falha registrada para {provider_name}: {error_msg}")
 
     def _call_provider(self, provider_name: str, prompt: str, max_tokens: int) -> Optional[str]:
         """Chama a função de geração do provedor especificado."""
@@ -273,10 +330,15 @@ class AIManager:
         if provider_name:
             if provider_name in self.providers:
                 self.providers[provider_name]['error_count'] = 0
+                self.providers[provider_name]['consecutive_failures'] = 0
+                self.providers[provider_name]['available'] = True
                 logger.info(f"🔄 Reset erros do provedor: {provider_name}")
         else:
             for provider in self.providers.values():
                 provider['error_count'] = 0
+                provider['consecutive_failures'] = 0
+                if provider.get('client'):  # Só reabilita se tem cliente configurado
+                    provider['available'] = True
             logger.info("🔄 Reset erros de todos os provedores")
 
     def _try_fallback(self, prompt: str, max_tokens: int, exclude: List[str]) -> Optional[str]:
@@ -288,7 +350,7 @@ class AIManager:
             (name, provider) for name, provider in self.providers.items()
             if (provider['available'] and 
                 name not in exclude and 
-                provider['error_count'] < provider.get('max_errors', 3))
+                provider['consecutive_failures'] < provider.get('max_errors', 2))
         ]
         
         if not available_providers:
@@ -296,17 +358,39 @@ class AIManager:
             return None
         
         # Ordena por prioridade
-        available_providers.sort(key=lambda x: (x[1]['priority'], x[1]['error_count']))
+        available_providers.sort(key=lambda x: (x[1]['priority'], x[1]['consecutive_failures']))
         next_provider = available_providers[0][0]
         
         logger.info(f"🔄 Tentando fallback para: {next_provider.upper()}")
         
         try:
-            return self._call_provider(next_provider, prompt, max_tokens)
+            result = self._call_provider(next_provider, prompt, max_tokens)
+            if result:
+                self._record_success(next_provider)
+                return result
+            else:
+                raise Exception("Resposta vazia do fallback")
         except Exception as e:
             logger.error(f"❌ Fallback para {next_provider} também falhou: {e}")
-            self.providers[next_provider]['error_count'] += 1
+            self._record_failure(next_provider, str(e))
             return self._try_fallback(prompt, max_tokens, exclude + [next_provider])
+    
+    def get_provider_status(self) -> Dict[str, Any]:
+        """Retorna status detalhado dos provedores"""
+        status = {}
+        
+        for name, provider in self.providers.items():
+            status[name] = {
+                'available': provider['available'],
+                'priority': provider['priority'],
+                'error_count': provider['error_count'],
+                'consecutive_failures': provider['consecutive_failures'],
+                'last_success': provider.get('last_success'),
+                'max_errors': provider['max_errors'],
+                'model': provider.get('model', 'N/A')
+            }
+        
+        return status
 
 # Instância global
 ai_manager = AIManager()

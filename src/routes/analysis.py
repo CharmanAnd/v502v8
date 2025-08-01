@@ -104,9 +104,22 @@ def analyze_market():
                     'timestamp': datetime.now().isoformat(),
                     'recommendation': recommendation,
                     'available_providers': available_providers,
+                    'provider_status': ai_status,
                     'retry_suggested': True,
                     'fallback_available': False
                 }), 503
+            
+            # Verifica se é erro de dados insuficientes
+            elif "DADOS INSUFICIENTES" in str(e) or "PESQUISA INSUFICIENTE" in str(e):
+                return jsonify({
+                    'error': 'Dados insuficientes para análise completa',
+                    'message': str(e),
+                    'timestamp': datetime.now().isoformat(),
+                    'recommendation': 'Tente com um segmento mais específico ou adicione mais informações',
+                    'retry_suggested': True,
+                    'fallback_available': True,
+                    'search_status': production_search_manager.get_provider_status()
+                }), 422
             
             return jsonify({
                 'error': 'Análise falhou por dados insuficientes',
@@ -120,16 +133,24 @@ def analyze_market():
                     'JINA_API_KEY (recomendado)',
                     'SERPER_API_KEY (opcional)'
                 ],
+                'ai_status': ai_manager.get_provider_status(),
+                'search_status': production_search_manager.get_provider_status(),
                 'fallback_available': False
             }), 500
         
         # Verifica se a análise foi bem-sucedida
         if not analysis_result or not isinstance(analysis_result, dict):
+            logger.error("❌ Análise retornou resultado inválido ou vazio")
             return jsonify({
                 'error': 'Análise retornou resultado inválido',
                 'message': 'Sistema não conseguiu gerar análise válida',
                 'timestamp': datetime.now().isoformat(),
-                'recommendation': 'Verifique configuração das APIs e tente novamente'
+                'recommendation': 'Verifique configuração das APIs e tente novamente',
+                'debug_info': {
+                    'result_type': type(analysis_result).__name__,
+                    'result_length': len(str(analysis_result)) if analysis_result else 0,
+                    'ai_status': ai_manager.get_provider_status()
+                }
             }), 500
         
         # Marca progresso como completo
@@ -200,8 +221,11 @@ def analyze_market():
         logger.error(f"❌ Erro crítico na análise: {str(e)}", exc_info=True)
         
         # Remove progresso em caso de erro
-        if session_id in get_progress_tracker.__globals__.get('progress_sessions', {}):
-            del get_progress_tracker.__globals__['progress_sessions'][session_id]
+        try:
+            if 'session_id' in locals() and session_id in get_progress_tracker.__globals__.get('progress_sessions', {}):
+                del get_progress_tracker.__globals__['progress_sessions'][session_id]
+        except:
+            pass  # Ignora erros de limpeza
         
         return jsonify({
             'error': 'Erro na análise',
@@ -210,12 +234,14 @@ def analyze_market():
             'fallback_available': False,
             'recommendation': 'Configure todas as APIs necessárias antes de tentar novamente',
             'debug_info': {
-                'session_id': session_id,
+                'session_id': locals().get('session_id', 'unknown'),
                 'input_data': {
                     'segmento': data.get('segmento'),
                     'produto': data.get('produto'),
                     'query': data.get('query')
-                }
+                },
+                'ai_status': ai_manager.get_provider_status(),
+                'search_status': production_search_manager.get_provider_status()
             }
         }), 500
 

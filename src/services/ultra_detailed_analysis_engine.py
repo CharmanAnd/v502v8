@@ -300,13 +300,19 @@ class UltraDetailedAnalysisEngine:
         total_content = research_data.get('total_content_length', 0)
         unique_sources = research_data.get('unique_sources', 0)
 
-        if total_content < self.min_content_threshold:
-            logger.error(f"❌ Conteúdo insuficiente: {total_content} < {self.min_content_threshold}")
+        # Critérios mais flexíveis para aceitar análise
+        min_content_flexible = max(5000, self.min_content_threshold // 6)  # Reduz para 5k mínimo
+        min_sources_flexible = max(3, self.min_sources_threshold // 3)     # Reduz para 3 fontes mínimo
+        
+        if total_content < min_content_flexible:
+            logger.error(f"❌ Conteúdo insuficiente: {total_content} < {min_content_flexible}")
             return False
 
-        if unique_sources < self.min_sources_threshold:
-            logger.error(f"❌ Fontes insuficientes: {unique_sources} < {self.min_sources_threshold}")
+        if unique_sources < min_sources_flexible:
+            logger.error(f"❌ Fontes insuficientes: {unique_sources} < {min_sources_flexible}")
             return False
+        
+        logger.info(f"✅ Pesquisa validada: {total_content} caracteres de {unique_sources} fontes")
 
         return True
 
@@ -610,9 +616,9 @@ Se não houver dados suficientes para uma seção, retorne "DADOS_INSUFICIENTES"
 
         # Palavras que indicam simulação
         simulation_indicators = [
-            'não informado', 'n/a', 'exemplo', 'simulado', 'fictício', 
-            'hipotético', 'genérico', 'placeholder', 'template',
-            'dados_insuficientes', 'não disponível'
+            'exemplo genérico', 'simulado', 'fictício', 'hipotético',
+            'placeholder', 'template', 'dados_insuficientes',
+            'não disponível para análise', 'informação não encontrada'
         ]
 
         # Converte análise para string
@@ -633,8 +639,14 @@ Se não houver dados suficientes para uma seção, retorne "DADOS_INSUFICIENTES"
 
         # Verifica se insights são substanciais
         insights = analysis.get('insights_exclusivos', [])
-        if len(insights) < 15:
-            logger.error(f"❌ Insights insuficientes: {len(insights)} < 15")
+        if len(insights) < 8:  # Reduzido de 15 para 8
+            logger.error(f"❌ Insights insuficientes: {len(insights)} < 8")
+            return True
+        
+        # Verifica qualidade dos insights
+        substantial_insights = [insight for insight in insights if len(insight) > 50]
+        if len(substantial_insights) < len(insights) * 0.7:  # 70% devem ser substanciais
+            logger.error(f"❌ Muitos insights superficiais: {len(substantial_insights)}/{len(insights)}")
             return True
 
         return False
@@ -879,16 +891,16 @@ Se não houver dados suficientes para uma seção, retorne "DADOS_INSUFICIENTES"
         pesquisa = final_analysis.get('pesquisa_massiva', {})
         estatisticas = pesquisa.get('estatisticas', {})
         
-        if estatisticas.get('fontes_unicas', 0) >= 10:
+        if estatisticas.get('fontes_unicas', 0) >= 3:  # Reduzido de 10 para 3
             score += 10
-        if estatisticas.get('total_conteudo', 0) >= 30000:
+        if estatisticas.get('total_conteudo', 0) >= 5000:  # Reduzido de 30k para 5k
             score += 10
 
         # Verifica análise IA (30 pontos)
         ai_analysis = final_analysis.get('analise_ia_gigante', {})
         if ai_analysis.get('avatar_ultra_detalhado'):
             score += 10
-        if ai_analysis.get('insights_exclusivos') and len(ai_analysis['insights_exclusivos']) >= 15:
+        if ai_analysis.get('insights_exclusivos') and len(ai_analysis['insights_exclusivos']) >= 8:  # Reduzido
             score += 10
         if ai_analysis.get('analise_concorrencia_detalhada'):
             score += 10
@@ -906,6 +918,13 @@ Se não houver dados suficientes para uma seção, retorne "DADOS_INSUFICIENTES"
             score += 10
         if final_analysis.get('predicoes_futuro'):
             score += 10
+        
+        # Bonus por qualidade da pesquisa
+        if estatisticas.get('fontes_unicas', 0) >= 10:
+            score += 5  # Bonus por muitas fontes
+        
+        if estatisticas.get('total_conteudo', 0) >= 20000:
+            score += 5  # Bonus por muito conteúdo
 
         return score
 

@@ -1,9 +1,8 @@
-
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
 ARQV30 Enhanced v2.0 - Robust Content Extractor
-Extrator multicamadas sem dependências pagas
+Extrator multicamadas aprimorado com suporte a PDF e fallback robusto
 """
 
 import os
@@ -13,6 +12,8 @@ import requests
 from typing import Dict, List, Optional, Any, Tuple
 from urllib.parse import urljoin, urlparse
 import re
+import tempfile
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 # Imports condicionais para não quebrar se não estiver instalado
 try:
@@ -40,12 +41,24 @@ try:
 except ImportError:
     HAS_BEAUTIFULSOUP = False
 
+try:
+    import PyPDF2
+    HAS_PYPDF2 = True
+except ImportError:
+    HAS_PYPDF2 = False
+
+try:
+    import pdfplumber
+    HAS_PDFPLUMBER = True
+except ImportError:
+    HAS_PDFPLUMBER = False
+
 from services.url_resolver import url_resolver
 
 logger = logging.getLogger(__name__)
 
 class RobustContentExtractor:
-    """Extrator de conteúdo multicamadas e robusto"""
+    """Extrator de conteúdo multicamadas e robusto com suporte aprimorado a PDF"""
     
     def __init__(self):
         self.session = requests.Session()
@@ -59,17 +72,23 @@ class RobustContentExtractor:
         })
         
         self.timeout = 30
-        self.min_content_length = 500
+        self.min_content_length = 200  # Reduzido de 500 para 200
         self.max_content_length = 50000  # 50K chars max
         
         # Estatísticas dos extratores
         self.stats = {
-            'trafilatura': {'success': 0, 'failed': 0, 'total_time': 0},
-            'readability': {'success': 0, 'failed': 0, 'total_time': 0},
-            'newspaper': {'success': 0, 'failed': 0, 'total_time': 0},
-            'beautifulsoup': {'success': 0, 'failed': 0, 'total_time': 0},
-            'total_extractions': 0,
-            'successful_extractions': 0
+            'trafilatura': {'success': 0, 'failed': 0, 'total_time': 0, 'usage_count': 0, 'available': HAS_TRAFILATURA},
+            'readability': {'success': 0, 'failed': 0, 'total_time': 0, 'usage_count': 0, 'available': HAS_READABILITY},
+            'newspaper': {'success': 0, 'failed': 0, 'total_time': 0, 'usage_count': 0, 'available': HAS_NEWSPAPER},
+            'beautifulsoup': {'success': 0, 'failed': 0, 'total_time': 0, 'usage_count': 0, 'available': HAS_BEAUTIFULSOUP},
+            'pdf_pypdf2': {'success': 0, 'failed': 0, 'total_time': 0, 'usage_count': 0, 'available': HAS_PYPDF2},
+            'pdf_pdfplumber': {'success': 0, 'failed': 0, 'total_time': 0, 'usage_count': 0, 'available': HAS_PDFPLUMBER},
+            'global': {
+                'total_extractions': 0,
+                'total_successes': 0,
+                'total_failures': 0,
+                'success_rate': 0.0
+            }
         }
         
         logger.info("🔧 Robust Content Extractor inicializado")
@@ -78,13 +97,13 @@ class RobustContentExtractor:
     def extract_content(self, url: str) -> Optional[str]:
         """
         Extrai conteúdo usando múltiplos extratores em ordem de prioridade
-        
-        Returns:
-            str: Conteúdo extraído (mínimo 500 chars) ou None se falhar
+        Agora com suporte aprimorado a PDF e melhor fallback
         """
         try:
             start_time = time.time()
-            self.stats['total_extractions'] += 1
+            self.stats['global']['total_extractions'] += 1
+            
+            logger.info(f"🔍 Iniciando extração de: {url}")
             
             # 1. Resolve URL de redirecionamento
             resolved_url = url_resolver.resolve_redirect_url(url)
@@ -92,15 +111,36 @@ class RobustContentExtractor:
                 logger.info(f"🔄 URL resolvida: {url} -> {resolved_url}")
                 url = resolved_url
             
-            # 2. Baixa conteúdo HTML
+            # 2. Verifica se é PDF
+            if self._is_pdf_url(url):
+                logger.info("📄 Detectado PDF - usando extratores especializados")
+                content = self._extract_pdf_content(url)
+                if content and self._validate_content(content, url):
+                    self.stats['global']['total_successes'] += 1
+                    self._update_global_stats()
+                    return content
+            
+            # 3. Baixa conteúdo HTML
             html_content = self._fetch_html(url)
             if not html_content:
                 logger.error(f"❌ Falha ao baixar HTML para {url}")
+                self.stats['global']['total_failures'] += 1
+                self._update_global_stats()
                 return None
             
             logger.info(f"📥 HTML baixado: {len(html_content)} caracteres")
             
-            # 3. Tenta extratores em ordem de prioridade
+            # 4. Verifica se é página dinâmica (JavaScript-heavy)
+            if self._is_dynamic_page(html_content):
+                logger.warning(f"⚠️ Página dinâmica detectada: {url}")
+                # Tenta extração mais agressiva
+                content = self._extract_dynamic_content(html_content, url)
+                if content and self._validate_content(content, url):
+                    self.stats['global']['total_successes'] += 1
+                    self._update_global_stats()
+                    return content
+            
+            # 5. Tenta extratores em ordem de prioridade
             extractors = [
                 ('trafilatura', self._extract_with_trafilatura),
                 ('readability', self._extract_with_readability),
@@ -114,15 +154,19 @@ class RobustContentExtractor:
                 
                 try:
                     logger.info(f"🔍 Tentando extração com {extractor_name}...")
+                    extractor_start = time.time()
+                    self.stats[extractor_name]['usage_count'] += 1
+                    
                     content = extractor_func(html_content, url)
+                    extractor_time = time.time() - extractor_start
                     
                     if self._validate_content(content, url):
-                        extraction_time = time.time() - start_time
                         self.stats[extractor_name]['success'] += 1
-                        self.stats[extractor_name]['total_time'] += extraction_time
-                        self.stats['successful_extractions'] += 1
+                        self.stats[extractor_name]['total_time'] += extractor_time
+                        self.stats['global']['total_successes'] += 1
+                        self._update_global_stats()
                         
-                        logger.info(f"✅ Extração bem-sucedida com {extractor_name}: {len(content)} caracteres em {extraction_time:.2f}s")
+                        logger.info(f"✅ Extração bem-sucedida com {extractor_name}: {len(content)} caracteres em {extractor_time:.2f}s")
                         return content
                     else:
                         self.stats[extractor_name]['failed'] += 1
@@ -133,59 +177,283 @@ class RobustContentExtractor:
                     logger.error(f"❌ Erro com {extractor_name}: {str(e)}")
                     continue
             
+            # 6. Fallback final - extração agressiva
+            logger.warning(f"⚠️ Todos os extratores padrão falharam, tentando extração agressiva...")
+            content = self._aggressive_fallback_extraction(html_content, url)
+            if content and len(content) >= 100:  # Critério mais flexível para fallback
+                logger.info(f"✅ Extração agressiva bem-sucedida: {len(content)} caracteres")
+                self.stats['global']['total_successes'] += 1
+                self._update_global_stats()
+                return content
+            
             # Todos os extratores falharam
             logger.error(f"❌ FALHA CRÍTICA: Todos os extratores falharam para {url}")
+            self.stats['global']['total_failures'] += 1
+            self._update_global_stats()
             return None
             
         except Exception as e:
             logger.error(f"❌ Erro crítico na extração de {url}: {str(e)}")
+            self.stats['global']['total_failures'] += 1
+            self._update_global_stats()
+            return None
+    
+    def _is_pdf_url(self, url: str) -> bool:
+        """Verifica se a URL aponta para um PDF"""
+        return (url.lower().endswith('.pdf') or 
+                'pdf' in url.lower() or 
+                'application/pdf' in url.lower())
+    
+    def _extract_pdf_content(self, url: str) -> Optional[str]:
+        """Extrai conteúdo de PDF usando múltiplas estratégias"""
+        
+        try:
+            # Baixa o PDF
+            response = self.session.get(url, timeout=self.timeout)
+            response.raise_for_status()
+            
+            # Salva temporariamente
+            with tempfile.NamedTemporaryFile(suffix='.pdf', delete=False) as temp_file:
+                temp_file.write(response.content)
+                temp_path = temp_file.name
+            
+            try:
+                # Tenta PDFPlumber primeiro (melhor para PDFs complexos)
+                if HAS_PDFPLUMBER:
+                    content = self._extract_pdf_with_pdfplumber(temp_path)
+                    if content and len(content) > 100:
+                        self.stats['pdf_pdfplumber']['success'] += 1
+                        logger.info(f"✅ PDF extraído com PDFPlumber: {len(content)} caracteres")
+                        return content
+                    else:
+                        self.stats['pdf_pdfplumber']['failed'] += 1
+                
+                # Fallback para PyPDF2
+                if HAS_PYPDF2:
+                    content = self._extract_pdf_with_pypdf2(temp_path)
+                    if content and len(content) > 100:
+                        self.stats['pdf_pypdf2']['success'] += 1
+                        logger.info(f"✅ PDF extraído com PyPDF2: {len(content)} caracteres")
+                        return content
+                    else:
+                        self.stats['pdf_pypdf2']['failed'] += 1
+                
+                logger.error(f"❌ Falha na extração de PDF: {url}")
+                return None
+                
+            finally:
+                # Remove arquivo temporário
+                try:
+                    os.unlink(temp_path)
+                except:
+                    pass
+                    
+        except Exception as e:
+            logger.error(f"❌ Erro ao processar PDF {url}: {str(e)}")
+            return None
+    
+    def _extract_pdf_with_pdfplumber(self, pdf_path: str) -> Optional[str]:
+        """Extrai texto usando PDFPlumber"""
+        try:
+            import pdfplumber
+            
+            text = ""
+            with pdfplumber.open(pdf_path) as pdf:
+                for page in pdf.pages:
+                    page_text = page.extract_text()
+                    if page_text:
+                        text += page_text + "\n"
+            
+            return self._clean_content(text) if text else None
+            
+        except Exception as e:
+            logger.error(f"Erro PDFPlumber: {e}")
+            return None
+    
+    def _extract_pdf_with_pypdf2(self, pdf_path: str) -> Optional[str]:
+        """Extrai texto usando PyPDF2"""
+        try:
+            import PyPDF2
+            
+            text = ""
+            with open(pdf_path, 'rb') as file:
+                pdf_reader = PyPDF2.PdfReader(file)
+                for page in pdf_reader.pages:
+                    page_text = page.extract_text()
+                    if page_text:
+                        text += page_text + "\n"
+            
+            return self._clean_content(text) if text else None
+            
+        except Exception as e:
+            logger.error(f"Erro PyPDF2: {e}")
+            return None
+    
+    def _is_dynamic_page(self, html: str) -> bool:
+        """Verifica se é página dinâmica (JavaScript-heavy)"""
+        if not html:
+            return False
+        
+        # Indicadores de página dinâmica
+        dynamic_indicators = [
+            'react', 'angular', 'vue.js', 'spa-',
+            'document.write', 'innerHTML', 'createElement',
+            'loading...', 'carregando...', 'please enable javascript',
+            'javascript required', 'js-', 'ng-', 'v-'
+        ]
+        
+        html_lower = html.lower()
+        js_indicators = sum(1 for indicator in dynamic_indicators if indicator in html_lower)
+        
+        # Se tem muitos indicadores JS e pouco conteúdo de texto
+        text_content = BeautifulSoup(html, 'html.parser').get_text() if HAS_BEAUTIFULSOUP else html
+        text_ratio = len(text_content.strip()) / len(html) if html else 0
+        
+        return js_indicators > 3 and text_ratio < 0.1
+    
+    def _extract_dynamic_content(self, html: str, url: str) -> Optional[str]:
+        """Extração especializada para conteúdo dinâmico"""
+        
+        if not HAS_BEAUTIFULSOUP:
+            return None
+        
+        try:
+            soup = BeautifulSoup(html, 'html.parser')
+            
+            # Remove scripts e elementos dinâmicos
+            for element in soup(['script', 'style', 'noscript', 'iframe']):
+                element.decompose()
+            
+            # Busca por elementos com conteúdo pré-renderizado
+            content_selectors = [
+                '[data-content]', '[data-text]', '.content-loaded',
+                '.server-rendered', '.static-content', '.preloaded',
+                'main', 'article', '.post-content', '.article-content',
+                '.entry-content', '.page-content', '.text-content'
+            ]
+            
+            extracted_content = []
+            
+            for selector in content_selectors:
+                try:
+                    elements = soup.select(selector)
+                    for element in elements:
+                        text = element.get_text(strip=True)
+                        if len(text) > 50:  # Conteúdo substancial
+                            extracted_content.append(text)
+                except:
+                    continue
+            
+            if extracted_content:
+                combined = '\n\n'.join(extracted_content)
+                return self._clean_content(combined)
+            
+            # Fallback: extrai todo texto disponível
+            all_text = soup.get_text()
+            return self._clean_content(all_text) if len(all_text) > 100 else None
+            
+        except Exception as e:
+            logger.error(f"Erro na extração dinâmica: {e}")
+            return None
+    
+    def _aggressive_fallback_extraction(self, html: str, url: str) -> Optional[str]:
+        """Extração agressiva como último recurso"""
+        
+        if not HAS_BEAUTIFULSOUP:
+            return None
+        
+        try:
+            soup = BeautifulSoup(html, 'html.parser')
+            
+            # Remove apenas elementos críticos
+            for element in soup(['script', 'style']):
+                element.decompose()
+            
+            # Coleta todo texto disponível
+            all_text = soup.get_text()
+            
+            # Filtra linhas com conteúdo significativo
+            lines = all_text.split('\n')
+            meaningful_lines = []
+            
+            for line in lines:
+                line = line.strip()
+                if (len(line) > 20 and  # Linha substancial
+                    not line.lower().startswith(('menu', 'nav', 'footer', 'header')) and
+                    not re.match(r'^[\s\W]*$', line)):  # Não só espaços/símbolos
+                    meaningful_lines.append(line)
+            
+            if meaningful_lines:
+                content = '\n'.join(meaningful_lines)
+                return self._clean_content(content)
+            
+            return None
+            
+        except Exception as e:
+            logger.error(f"Erro na extração agressiva: {e}")
             return None
     
     def _fetch_html(self, url: str) -> Optional[str]:
-        """Baixa conteúdo HTML da URL"""
-        try:
-            response = self.session.get(
-                url,
-                timeout=self.timeout,
-                verify=False,  # Para evitar problemas de SSL
-                allow_redirects=True
-            )
-            
-            response.raise_for_status()
-            
-            # Detecta encoding
-            if response.encoding is None:
-                response.encoding = 'utf-8'
-            
-            html = response.text
-            
-            if len(html) < 1000:
-                logger.warning(f"⚠️ HTML muito pequeno: {len(html)} caracteres")
-                return None
-            
-            return html
-            
-        except Exception as e:
-            logger.error(f"❌ Erro ao baixar {url}: {str(e)}")
-            return None
+        """Baixa conteúdo HTML da URL com retry"""
+        max_retries = 3
+        
+        for attempt in range(max_retries):
+            try:
+                response = self.session.get(
+                    url,
+                    timeout=self.timeout,
+                    verify=False,  # Para evitar problemas de SSL
+                    allow_redirects=True
+                )
+                
+                response.raise_for_status()
+                
+                # Detecta encoding
+                if response.encoding is None:
+                    response.encoding = 'utf-8'
+                
+                html = response.text
+                
+                if len(html) < 500:
+                    logger.warning(f"⚠️ HTML muito pequeno (tentativa {attempt + 1}): {len(html)} caracteres")
+                    if attempt < max_retries - 1:
+                        time.sleep(2)  # Aguarda antes de tentar novamente
+                        continue
+                
+                return html
+                
+            except requests.exceptions.Timeout:
+                logger.warning(f"⏰ Timeout na tentativa {attempt + 1} para {url}")
+                if attempt < max_retries - 1:
+                    time.sleep(2)
+                    continue
+            except Exception as e:
+                logger.error(f"❌ Erro ao baixar {url} (tentativa {attempt + 1}): {str(e)}")
+                if attempt < max_retries - 1:
+                    time.sleep(2)
+                    continue
+        
+        return None
     
     def _extract_with_trafilatura(self, html: str, url: str) -> Optional[str]:
-        """Extrai com Trafilatura (prioridade 1)"""
+        """Extrai com Trafilatura (prioridade 1) com configurações aprimoradas"""
         if not HAS_TRAFILATURA:
             return None
         
         try:
+            # Configurações mais agressivas para trafilatura
             content = trafilatura.extract(
                 html, 
                 include_comments=False,
                 include_tables=True,
                 include_formatting=False,
-                favor_precision=True,
-                url=url
+                favor_precision=False,  # Mudado para False para ser mais inclusivo
+                favor_recall=True,      # Prioriza recuperar mais conteúdo
+                url=url,
+                config=trafilatura.settings.use_config()
             )
             
             if content:
-                # Limpa conteúdo
                 content = self._clean_content(content)
                 return content
             
@@ -196,12 +464,13 @@ class RobustContentExtractor:
             return None
     
     def _extract_with_readability(self, html: str, url: str) -> Optional[str]:
-        """Extrai com Readability (prioridade 2)"""
+        """Extrai com Readability (prioridade 2) com configurações aprimoradas"""
         if not HAS_READABILITY:
             return None
         
         try:
-            doc = Document(html)
+            # Configurações mais inclusivas
+            doc = Document(html, positive_keywords=['content', 'article', 'post', 'text', 'main'])
             content = doc.summary()
             
             if content:
@@ -223,7 +492,7 @@ class RobustContentExtractor:
             return None
     
     def _extract_with_newspaper(self, html: str, url: str) -> Optional[str]:
-        """Extrai com Newspaper3k (prioridade 3)"""
+        """Extrai com Newspaper3k (prioridade 3) com configurações aprimoradas"""
         if not HAS_NEWSPAPER:
             return None
         
@@ -244,7 +513,7 @@ class RobustContentExtractor:
             return None
     
     def _extract_with_beautifulsoup(self, html: str, url: str) -> Optional[str]:
-        """Extrai com BeautifulSoup (fallback final)"""
+        """Extrai com BeautifulSoup (fallback final) com estratégia aprimorada"""
         if not HAS_BEAUTIFULSOUP:
             return None
         
@@ -252,38 +521,28 @@ class RobustContentExtractor:
             soup = BeautifulSoup(html, 'html.parser')
             
             # Remove scripts e styles
-            for script in soup(["script", "style", "nav", "header", "footer", "aside"]):
+            for script in soup(['script', 'style', 'nav', 'header', 'footer', 'aside', 'form']):
                 script.decompose()
             
-            # Procura pelo conteúdo principal
-            main_content = None
-            
-            # Tenta encontrar containers de conteúdo
-            content_selectors = [
-                'article', 'main', '.content', '#content', '.post', '.article',
-                '.entry', '.text', '.body', '.container', 'div[role="main"]'
+            # Estratégia em camadas para encontrar conteúdo
+            content_strategies = [
+                # Estratégia 1: Elementos semânticos
+                lambda: self._extract_semantic_content(soup),
+                # Estratégia 2: Elementos por classe/ID
+                lambda: self._extract_by_selectors(soup),
+                # Estratégia 3: Maior bloco de texto
+                lambda: self._extract_largest_text_block(soup),
+                # Estratégia 4: Todo o body
+                lambda: self._extract_full_body(soup)
             ]
             
-            for selector in content_selectors:
+            for strategy in content_strategies:
                 try:
-                    element = soup.select_one(selector)
-                    if element:
-                        main_content = element.get_text()
-                        break
+                    content = strategy()
+                    if content and len(content) > 100:
+                        return self._clean_content(content)
                 except:
                     continue
-            
-            # Se não encontrou, pega o body
-            if not main_content:
-                body = soup.find('body')
-                if body:
-                    main_content = body.get_text()
-                else:
-                    main_content = soup.get_text()
-            
-            if main_content:
-                content = self._clean_content(main_content)
-                return content
             
             return None
             
@@ -291,19 +550,97 @@ class RobustContentExtractor:
             logger.error(f"Erro BeautifulSoup: {e}")
             return None
     
+    def _extract_semantic_content(self, soup) -> Optional[str]:
+        """Extrai usando elementos semânticos HTML5"""
+        semantic_elements = soup.find_all(['article', 'main', 'section'])
+        
+        if semantic_elements:
+            content_parts = []
+            for element in semantic_elements:
+                text = element.get_text()
+                if len(text) > 50:
+                    content_parts.append(text)
+            
+            if content_parts:
+                return '\n\n'.join(content_parts)
+        
+        return None
+    
+    def _extract_by_selectors(self, soup) -> Optional[str]:
+        """Extrai usando seletores CSS comuns"""
+        content_selectors = [
+            '.content', '#content', '.post', '.article',
+            '.entry', '.text', '.body', '.main-content',
+            '.post-content', '.article-content', '.entry-content',
+            '.page-content', '.text-content', '.story-content'
+        ]
+        
+        for selector in content_selectors:
+            try:
+                elements = soup.select(selector)
+                if elements:
+                    content_parts = []
+                    for element in elements:
+                        text = element.get_text()
+                        if len(text) > 50:
+                            content_parts.append(text)
+                    
+                    if content_parts:
+                        return '\n\n'.join(content_parts)
+            except:
+                continue
+        
+        return None
+    
+    def _extract_largest_text_block(self, soup) -> Optional[str]:
+        """Encontra e extrai o maior bloco de texto"""
+        all_divs = soup.find_all(['div', 'section', 'article'])
+        
+        largest_text = ""
+        largest_size = 0
+        
+        for div in all_divs:
+            text = div.get_text()
+            if len(text) > largest_size:
+                largest_size = len(text)
+                largest_text = text
+        
+        return largest_text if largest_size > 100 else None
+    
+    def _extract_full_body(self, soup) -> Optional[str]:
+        """Extrai todo o conteúdo do body como último recurso"""
+        body = soup.find('body')
+        if body:
+            return body.get_text()
+        else:
+            return soup.get_text()
+    
     def _clean_content(self, content: str) -> str:
-        """Limpa e normaliza o conteúdo extraído"""
+        """Limpa e normaliza o conteúdo extraído com melhorias"""
         if not content:
             return ""
         
         # Remove quebras de linha excessivas
-        content = re.sub(r'\n\s*\n\s*\n', '\n\n', content)
+        content = re.sub(r'\n\s*\n\s*\n+', '\n\n', content)
         
         # Remove espaços excessivos
         content = re.sub(r'[ \t]+', ' ', content)
         
         # Remove caracteres de controle
         content = re.sub(r'[\x00-\x08\x0B\x0C\x0E-\x1F\x7F]', '', content)
+        
+        # Remove linhas muito curtas (provavelmente navegação)
+        lines = content.split('\n')
+        meaningful_lines = []
+        
+        for line in lines:
+            line = line.strip()
+            if (len(line) > 10 and  # Linha substancial
+                not re.match(r'^[\s\W]*$', line) and  # Não só símbolos
+                not line.lower() in ['menu', 'home', 'contato', 'sobre', 'login']):  # Não navegação
+                meaningful_lines.append(line)
+        
+        content = '\n'.join(meaningful_lines)
         
         # Normaliza
         content = content.strip()
@@ -315,27 +652,40 @@ class RobustContentExtractor:
         return content
     
     def _validate_content(self, content: str, url: str) -> bool:
-        """Valida se o conteúdo extraído é válido"""
+        """Valida se o conteúdo extraído é válido com critérios aprimorados"""
         if not content:
             return False
         
-        # Verifica tamanho mínimo
+        # Verifica tamanho mínimo (reduzido para ser mais flexível)
         if len(content) < self.min_content_length:
-            logger.warning(f"⚠️ Conteúdo muito pequeno para {url}: {len(content)} < {self.min_content_length}")
+            logger.warning(f"⚠️ Conteúdo pequeno para {url}: {len(content)} < {self.min_content_length}")
+            # Para PDFs, aceita conteúdo menor
+            if self._is_pdf_url(url) and len(content) > 100:
+                logger.info(f"✅ PDF aceito com conteúdo menor: {len(content)} caracteres")
+                return True
             return False
         
         # Verifica se não é só lixo
         words = content.split()
-        if len(words) < 50:  # Mínimo 50 palavras
-            logger.warning(f"⚠️ Muito poucas palavras para {url}: {len(words)}")
+        if len(words) < 20:  # Reduzido de 50 para 20
+            logger.warning(f"⚠️ Poucas palavras para {url}: {len(words)}")
             return False
         
-        # Verifica se tem conteúdo real (não só navegação)
-        common_words = ['o', 'a', 'de', 'da', 'do', 'e', 'em', 'um', 'uma', 'com', 'não', 'para', 'que', 'se']
+        # Verifica densidade de conteúdo real
+        common_words = ['o', 'a', 'de', 'da', 'do', 'e', 'em', 'um', 'uma', 'com', 'não', 'para', 'que', 'se', 'é', 'ou']
         real_words = sum(1 for word in words if any(common in word.lower() for common in common_words))
         
-        if real_words / len(words) < 0.1:  # Pelo menos 10% de palavras comuns
-            logger.warning(f"⚠️ Conteúdo suspeito para {url}: poucos conectivos")
+        if real_words / len(words) < 0.05:  # Reduzido de 0.1 para 0.05
+            logger.warning(f"⚠️ Conteúdo suspeito para {url}: poucos conectivos ({real_words}/{len(words)})")
+            return False
+        
+        # Verifica se não é página de erro
+        error_indicators = ['404', 'not found', 'página não encontrada', 'erro', 'error', 'forbidden', 'access denied']
+        content_lower = content.lower()
+        
+        error_count = sum(1 for indicator in error_indicators if indicator in content_lower)
+        if error_count > 2 and len(content) < 1000:  # Muitos indicadores de erro em conteúdo pequeno
+            logger.warning(f"⚠️ Possível página de erro para {url}")
             return False
         
         logger.info(f"✅ Conteúdo válido para {url}: {len(content)} caracteres, {len(words)} palavras")
@@ -343,64 +693,142 @@ class RobustContentExtractor:
     
     def _is_extractor_available(self, extractor_name: str) -> bool:
         """Verifica se o extrator está disponível"""
-        availability = {
-            'trafilatura': HAS_TRAFILATURA,
-            'readability': HAS_READABILITY,
-            'newspaper': HAS_NEWSPAPER,
-            'beautifulsoup': HAS_BEAUTIFULSOUP
-        }
-        return availability.get(extractor_name, False)
+        return self.stats.get(extractor_name, {}).get('available', False)
     
     def _get_available_extractors(self) -> List[str]:
         """Retorna lista de extratores disponíveis"""
         available = []
-        if HAS_TRAFILATURA:
-            available.append('trafilatura')
-        if HAS_READABILITY:
-            available.append('readability')
-        if HAS_NEWSPAPER:
-            available.append('newspaper')
-        if HAS_BEAUTIFULSOUP:
-            available.append('beautifulsoup')
+        for name, stats in self.stats.items():
+            if name != 'global' and stats.get('available', False):
+                available.append(name)
         return available
+    
+    def _update_global_stats(self):
+        """Atualiza estatísticas globais"""
+        total = self.stats['global']['total_extractions']
+        successes = self.stats['global']['total_successes']
+        
+        if total > 0:
+            self.stats['global']['success_rate'] = (successes / total) * 100
+        
+        # Atualiza estatísticas individuais dos extratores
+        for extractor_name, stats in self.stats.items():
+            if extractor_name == 'global':
+                continue
+            
+            total_attempts = stats['success'] + stats['failed']
+            if total_attempts > 0:
+                stats['success_rate'] = (stats['success'] / total_attempts) * 100
+                if stats['success'] > 0:
+                    stats['avg_response_time'] = stats['total_time'] / stats['success']
+                else:
+                    stats['avg_response_time'] = 0
+            else:
+                stats['success_rate'] = 0
+                stats['avg_response_time'] = 0
+            
+            # Adiciona razão se não disponível
+            if not stats['available']:
+                if extractor_name == 'trafilatura' and not HAS_TRAFILATURA:
+                    stats['reason'] = 'Biblioteca trafilatura não instalada'
+                elif extractor_name == 'readability' and not HAS_READABILITY:
+                    stats['reason'] = 'Biblioteca readability-lxml não instalada'
+                elif extractor_name == 'newspaper' and not HAS_NEWSPAPER:
+                    stats['reason'] = 'Biblioteca newspaper3k não instalada'
+                elif extractor_name == 'beautifulsoup' and not HAS_BEAUTIFULSOUP:
+                    stats['reason'] = 'Biblioteca beautifulsoup4 não instalada'
+                elif extractor_name == 'pdf_pypdf2' and not HAS_PYPDF2:
+                    stats['reason'] = 'Biblioteca PyPDF2 não instalada'
+                elif extractor_name == 'pdf_pdfplumber' and not HAS_PDFPLUMBER:
+                    stats['reason'] = 'Biblioteca pdfplumber não instalada'
     
     def get_extractor_stats(self) -> Dict[str, Any]:
         """Retorna estatísticas dos extratores"""
-        stats_copy = self.stats.copy()
-        
-        # Calcula percentuais de sucesso
-        for extractor in ['trafilatura', 'readability', 'newspaper', 'beautifulsoup']:
-            total = stats_copy[extractor]['success'] + stats_copy[extractor]['failed']
-            if total > 0:
-                stats_copy[extractor]['success_rate'] = (stats_copy[extractor]['success'] / total) * 100
-                if stats_copy[extractor]['success'] > 0:
-                    stats_copy[extractor]['avg_time'] = stats_copy[extractor]['total_time'] / stats_copy[extractor]['success']
-                else:
-                    stats_copy[extractor]['avg_time'] = 0
-            else:
-                stats_copy[extractor]['success_rate'] = 0
-                stats_copy[extractor]['avg_time'] = 0
-        
-        # Taxa geral de sucesso
-        if stats_copy['total_extractions'] > 0:
-            stats_copy['overall_success_rate'] = (stats_copy['successful_extractions'] / stats_copy['total_extractions']) * 100
-        else:
-            stats_copy['overall_success_rate'] = 0
-        
-        return stats_copy
+        self._update_global_stats()
+        return self.stats.copy()
     
     def reset_extractor_stats(self, extractor_name: Optional[str] = None):
         """Reset estatísticas dos extratores"""
         if extractor_name and extractor_name in self.stats:
-            self.stats[extractor_name] = {'success': 0, 'failed': 0, 'total_time': 0}
+            if extractor_name != 'global':
+                self.stats[extractor_name].update({
+                    'success': 0, 'failed': 0, 'total_time': 0, 'usage_count': 0,
+                    'success_rate': 0, 'avg_response_time': 0
+                })
             logger.info(f"🔄 Reset estatísticas do extrator: {extractor_name}")
         else:
             # Reset todas
-            for extractor in ['trafilatura', 'readability', 'newspaper', 'beautifulsoup']:
-                self.stats[extractor] = {'success': 0, 'failed': 0, 'total_time': 0}
-            self.stats['total_extractions'] = 0
-            self.stats['successful_extractions'] = 0
+            for extractor in self.stats:
+                if extractor != 'global':
+                    self.stats[extractor].update({
+                        'success': 0, 'failed': 0, 'total_time': 0, 'usage_count': 0,
+                        'success_rate': 0, 'avg_response_time': 0
+                    })
+            
+            self.stats['global'] = {
+                'total_extractions': 0,
+                'total_successes': 0,
+                'total_failures': 0,
+                'success_rate': 0.0
+            }
             logger.info("🔄 Reset estatísticas de todos os extratores")
+    
+    def batch_extract(self, urls: List[str], max_workers: int = 5) -> Dict[str, Optional[str]]:
+        """Extrai conteúdo de múltiplas URLs em paralelo"""
+        results = {}
+        
+        with ThreadPoolExecutor(max_workers=max_workers) as executor:
+            future_to_url = {executor.submit(self.extract_content, url): url for url in urls}
+            
+            for future in as_completed(future_to_url):
+                url = future_to_url[future]
+                try:
+                    content = future.result()
+                    results[url] = content
+                except Exception as e:
+                    logger.error(f"Erro na extração paralela de {url}: {e}")
+                    results[url] = None
+        
+        return results
+    
+    def test_extraction(self, url: str) -> Dict[str, Any]:
+        """Testa extração para uma URL específica com detalhes"""
+        start_time = time.time()
+        
+        result = {
+            'url': url,
+            'success': False,
+            'content_length': 0,
+            'extraction_time': 0,
+            'extractor_used': None,
+            'error': None,
+            'content_preview': None
+        }
+        
+        try:
+            content = self.extract_content(url)
+            extraction_time = time.time() - start_time
+            
+            if content:
+                result.update({
+                    'success': True,
+                    'content_length': len(content),
+                    'extraction_time': extraction_time,
+                    'content_preview': content[:500] + '...' if len(content) > 500 else content
+                })
+            else:
+                result.update({
+                    'extraction_time': extraction_time,
+                    'error': 'Nenhum conteúdo extraído'
+                })
+                
+        except Exception as e:
+            result.update({
+                'extraction_time': time.time() - start_time,
+                'error': str(e)
+            })
+        
+        return result
     
     def clear_cache(self):
         """Limpa cache de sessão"""

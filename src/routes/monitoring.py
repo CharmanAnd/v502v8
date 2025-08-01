@@ -43,16 +43,40 @@ def test_extraction():
         }), 400
     
     try:
-        result = robust_content_extractor.test_extraction(url)
+        # Testa extração com detalhes
+        content = robust_content_extractor.extract_content(url)
+        
+        if content:
+            # Valida qualidade do conteúdo
+            from services.content_quality_validator import content_quality_validator
+            validation = content_quality_validator.validate_content(content, url)
+            
+            result = {
+                'success': True,
+                'url': url,
+                'content_length': len(content),
+                'content_preview': content[:500] + '...' if len(content) > 500 else content,
+                'validation': validation,
+                'extractor_stats': robust_content_extractor.get_extractor_stats()
+            }
+        else:
+            result = {
+                'success': False,
+                'url': url,
+                'error': 'Falha na extração de conteúdo',
+                'extractor_stats': robust_content_extractor.get_extractor_stats()
+            }
+        
         return jsonify({
-            'success': True,
-            'result': result
+            'success': result['success'],
+            **result
         })
     except Exception as e:
         logger.error(f"❌ Erro ao testar extração: {str(e)}")
         return jsonify({
             'success': False,
-            'error': str(e)
+            'error': str(e),
+            'extractor_stats': robust_content_extractor.get_extractor_stats()
         }), 500
 
 
@@ -60,25 +84,49 @@ def test_extraction():
 def health_check():
     """Verifica saúde do sistema"""
     try:
-        # Testa extração com URL simples
-        test_url = "https://httpbin.org/html"
-        result = robust_content_extractor.test_extraction(test_url)
+        # Testa extração com URL brasileira real
+        test_url = "https://g1.globo.com/"
+        content = robust_content_extractor.extract_content(test_url)
+        extraction_success = content is not None and len(content) > 100
         
         stats = robust_content_extractor.get_extractor_stats()
+        global_stats = stats.get('global', {})
         available_extractors = sum(1 for name, data in stats.items() 
                                  if name != 'global' and data.get('available', False))
         
+        # Verifica status das APIs de IA
+        from services.ai_manager import ai_manager
+        ai_status = ai_manager.get_provider_status()
+        available_ai = sum(1 for provider in ai_status.values() if provider.get('available', False))
+        
+        # Verifica status de busca
+        from services.production_search_manager import production_search_manager
+        search_status = production_search_manager.get_provider_status()
+        available_search = sum(1 for provider in search_status.values() if provider.get('enabled', False))
+        
+        overall_health = 'healthy'
+        if available_extractors == 0 or available_ai == 0:
+            overall_health = 'critical'
+        elif available_extractors < 2 or available_search == 0:
+            overall_health = 'degraded'
+        
         return jsonify({
             'success': True,
-            'status': 'healthy' if available_extractors > 0 else 'degraded',
+            'status': overall_health,
             'available_extractors': available_extractors,
-            'test_extraction': result['success'],
-            'stats': stats
+            'available_ai_providers': available_ai,
+            'available_search_providers': available_search,
+            'test_extraction': extraction_success,
+            'extraction_stats': global_stats,
+            'ai_status': ai_status,
+            'search_status': search_status,
+            'timestamp': datetime.now().isoformat()
         })
     except Exception as e:
         logger.error(f"❌ Erro no health check: {str(e)}")
         return jsonify({
             'success': False,
-            'status': 'unhealthy',
-            'error': str(e)
+            'status': 'critical',
+            'error': str(e),
+            'timestamp': datetime.now().isoformat()
         }), 500
